@@ -1,0 +1,3 @@
+{
+  "extends": "@research-agent/config/tsconfig.base.json"
+}
