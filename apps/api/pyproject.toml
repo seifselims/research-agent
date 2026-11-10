@@ -37,3 +37,12 @@ dev = [
     "pytest-asyncio>=1.4.1.post1",
     "ruff>=0.17.4",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+# E/W: style errors, F: real bugs (unused names, undefined vars), I: import order,
+# UP: modern Python syntax, B: likely bugs, ASYNC: asyncio mistakes, SIM: simpler code
+select = ["E", "W", "F", "I", "UP", "B", "ASYNC", "SIM"]

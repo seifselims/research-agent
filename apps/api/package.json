@@ -1,0 +1,11 @@
+{
+  "name": "api",
+  "private": true,
+  "description": "Python package; this file only lets Turborepo run its scripts.",
+  "scripts": {
+    "lint": "uv run ruff check .",
+    "format": "uv run ruff check --fix . && uv run ruff format .",
+    "format:check": "uv run ruff format --check .",
+    "check-providers": "uv run python scripts/check_providers.py"
+  }
+}

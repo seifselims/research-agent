@@ -1,6 +1,23 @@
 name: research-agent
 
 services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: deepscout
+      POSTGRES_PASSWORD: deepscout
+      POSTGRES_DB: deepscout
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U deepscout -d deepscout"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   web:
     build:
       context: .
@@ -26,6 +43,9 @@ services:
       retries: 5
       start_period: 10s
     restart: unless-stopped
+
+volumes:
+  db_data:
 
 # BuildKit makes these available only while install/build commands run.
 secrets:

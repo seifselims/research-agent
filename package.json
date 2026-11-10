@@ -16,7 +16,10 @@
     "docker:down": "docker compose down",
     "docker:logs": "docker compose logs -f",
     "env:generate": "varlock codegen --path ./apps/web/",
-    "postinstall": "varlock codegen --path ./apps/web/"
+    "postinstall": "varlock codegen --path ./apps/web/",
+    "lint": "turbo run lint",
+    "format": "turbo run format",
+    "format:check": "turbo run format:check"
   },
   "dependencies": {
     "zod": "catalog:"
