@@ -7,16 +7,38 @@ Better Auth tables below.
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
+from typing import Any
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, MetaData, Text, func
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Identity,
+    Index,
+    Integer,
+    MetaData,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+# Length of each embedding vector. Must equal EMBEDDING_DIMENSIONS in .env (the embedding model's
+# output size). Changing it needs a new migration and re-embedding every chunk.
+EMBEDDING_DIMENSIONS = 768
 
 # Predictable names for indexes and constraints. Without this, Postgres invents names and
 # Alembic can't reliably find them later to alter or drop them.
 NAMING_CONVENTION = {
     "ix": "ix_%(column_0_label)s",
-    "uq": "uq_%(table_name)s_%(column_0_name)s",
+    "uq": "uq_%(table_name)s_%(column_0_N_name)s",  # all columns, e.g. uq_sources_job_id_url
     "ck": "ck_%(table_name)s_%(constraint_name)s",
     "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
     "pk": "pk_%(table_name)s",
@@ -191,3 +213,141 @@ class ResearchJob(TimestampMixin, Base):
         # Speeds up "this user's jobs, newest first", the most common query.
         Index("ix_research_jobs_user_id_created_at", "user_id", "created_at"),
     )
+
+
+# Every table below belongs to a research job (directly or through a source) and uses
+# ON DELETE CASCADE, so deleting a job removes everything it produced in one statement.
+
+
+class JobEvent(Base):
+    """One progress update from a running job ("searching", "found 8 sources", ...).
+
+    The frontend streams these live. The id is a plain increasing number (not a UUID) so events
+    sort in the exact order they were written, and a client that reconnects can ask for
+    "everything after event 41".
+    """
+
+    __tablename__ = "job_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("research_jobs.id", ondelete="CASCADE"))
+    # Short machine-readable kind, e.g. "status", "search", "source", "error". Free text rather
+    # than an enum because the agent (later parts) will define the exact set.
+    type: Mapped[str] = mapped_column(String(50))
+    message: Mapped[str] = mapped_column(Text)  # human-readable line shown in the UI
+    data: Mapped[dict[str, Any] | None] = mapped_column(JSONB)  # optional structured details
+    created_at: Mapped[datetime] = created_at_column()
+
+    __table_args__ = (
+        # "Events for this job, in order, after id X": the streaming query.
+        Index("ix_job_events_job_id_id", "job_id", "id"),
+    )
+
+
+class Report(TimestampMixin, Base):
+    """The finished research report. At most one per job."""
+
+    __tablename__ = "reports"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid7)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("research_jobs.id", ondelete="CASCADE"), unique=True
+    )
+    # Copied from the job so "list my reports" and ownership checks don't need a join.
+    user_id: Mapped[str] = mapped_column(Text, ForeignKey("user.id", ondelete="CASCADE"))
+    title: Mapped[str] = mapped_column(Text)
+    content: Mapped[str] = mapped_column(Text)  # markdown, with citations like [1], [2]
+
+    __table_args__ = (Index("ix_reports_user_id_created_at", "user_id", "created_at"),)
+
+
+class Source(Base):
+    """A web page the agent found and read during a job. Reports cite these."""
+
+    __tablename__ = "sources"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid7)
+    # Linked to the job rather than the report: sources are collected while the job runs,
+    # before any report exists.
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("research_jobs.id", ondelete="CASCADE"), index=True
+    )
+    url: Mapped[str] = mapped_column(Text)
+    title: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = created_at_column()
+
+    # The same page is stored only once per job.
+    __table_args__ = (UniqueConstraint("job_id", "url"),)
+
+
+class SourceChunk(Base):
+    """A piece of a source's text (a few hundred words) plus its embedding.
+
+    The embedding is a list of numbers representing the chunk's meaning. pgvector compares them
+    to find the chunks most relevant to a question, even without matching words.
+    """
+
+    __tablename__ = "source_chunks"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("sources.id", ondelete="CASCADE"), index=True
+    )
+    # Copied from the source so "most relevant chunks for this job" needs no join.
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("research_jobs.id", ondelete="CASCADE"), index=True
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer)  # position within the source: 0, 1, 2...
+    content: Mapped[str] = mapped_column(Text)
+    # Nullable: a chunk is saved first and embedded afterwards, which can fail and be retried.
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIMENSIONS))
+
+    __table_args__ = (
+        UniqueConstraint("source_id", "chunk_index"),
+        # HNSW: pgvector's approximate nearest-neighbour index, so similarity search stays fast
+        # as the table grows. vector_cosine_ops matches queries using cosine distance (<=>).
+        Index(
+            "ix_source_chunks_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+    )
+
+
+class RunMetrics(Base):
+    """Cost and performance numbers for one job: the 'receipt'. One row per job."""
+
+    __tablename__ = "run_metrics"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid7)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("research_jobs.id", ondelete="CASCADE"), unique=True
+    )
+    model: Mapped[str | None] = mapped_column(Text)  # main LLM used, e.g. "gemini/..."
+    llm_calls: Mapped[int] = mapped_column(Integer, server_default="0")
+    input_tokens: Mapped[int] = mapped_column(BigInteger, server_default="0")
+    output_tokens: Mapped[int] = mapped_column(BigInteger, server_default="0")
+    sources_fetched: Mapped[int] = mapped_column(Integer, server_default="0")
+    # Numeric (exact decimal), not float: money shouldn't pick up rounding errors.
+    estimated_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(10, 6))
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = created_at_column()
+
+
+class RateLimit(Base):
+    """How many times a user did an action in one time window (e.g. jobs started this hour).
+
+    One row per (user, action, window). The API increments it with a single atomic
+    INSERT ... ON CONFLICT DO UPDATE SET count = count + 1, which stays correct even with
+    several API processes, then rejects the request if the count is over the limit.
+    """
+
+    __tablename__ = "rate_limits"
+
+    user_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("user.id", ondelete="CASCADE"), primary_key=True
+    )
+    action: Mapped[str] = mapped_column(String(50), primary_key=True)  # e.g. "create_job"
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    count: Mapped[int] = mapped_column(Integer, server_default="0")
