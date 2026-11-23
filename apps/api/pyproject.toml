@@ -46,3 +46,9 @@ target-version = "py314"
 # E/W: style errors, F: real bugs (unused names, undefined vars), I: import order,
 # UP: modern Python syntax, B: likely bugs, ASYNC: asyncio mistakes, SIM: simpler code
 select = ["E", "W", "F", "I", "UP", "B", "ASYNC", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Every async test runs on the event loop without needing @pytest.mark.asyncio on each one.
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
